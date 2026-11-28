@@ -137,8 +137,8 @@ export function createFerrisWheel() {
   const R = WHEEL.radius;
   const rim = [];
   for (const z of [-0.6, 0.6]) {
-    rim.push(part(new THREE.TorusGeometry(R, 0.12, 4, 48), WHITE, { z }));
-    rim.push(part(new THREE.TorusGeometry(R * 0.55, 0.08, 4, 32), RED, { z }));
+    rim.push(part(new THREE.TorusGeometry(R, 0.12, 4, 32), WHITE, { z }));
+    rim.push(part(new THREE.TorusGeometry(R * 0.55, 0.08, 4, 24), RED, { z }));
     for (let i = 0; i < 16; i++) {
       const a = (i / 16) * TAU;
       rim.push(beam(0, 0, Math.sin(a) * R, Math.cos(a) * R, z, 0.09, WHITE));

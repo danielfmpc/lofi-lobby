@@ -147,7 +147,7 @@ export function createCapybara() {
   geo.translate(0, 0.45, 0); // feet near the origin, like the trainers
   const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: tex, alphaTest: 0.5, side: THREE.DoubleSide }));
   mesh.customDepthMaterial = new THREE.MeshDepthMaterial({ map: tex, alphaTest: 0.5, depthPacking: THREE.RGBADepthPacking });
-  mesh.castShadow = true;
+  mesh.castShadow = false; // contact shadow added in main.js; avoids 6-face lamp cubemap redraws all night
   mesh.scale.set(5, 3.75, 1); // same pixel size as a trainer (5 units per 32px)
 
   let pose = "walk", // "walk" | "eat" (sitting, chewing) | "sit"

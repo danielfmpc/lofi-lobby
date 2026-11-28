@@ -3,6 +3,7 @@
 // Loaded strictly inside `if (import.meta.env.DEV)` so production builds emit zero debug UI/CSS.
 import { createCatDebugModule } from "./cat-debug.js";
 import { createCycleDebugModule } from "./cycle-debug.js";
+import { createStressDebugModule } from "./stress-debug.js";
 
 const HUB_CSS = `
   #debug-panel { left: 28px; top: 200px; width: 280px; padding: 12px 14px; font-size: 11px; line-height: 1.45; color: #C4C6D4; z-index: 4; }
@@ -220,6 +221,14 @@ export function setupDebug(app) {
     getLook,
     getRainAmount,
     getLampIntensity,
+    others,
+    createOther,
+    removeOther,
+    showBubble,
+    getPos,
+    keepAwake,
+    NAME_COLORS,
+    CAPS,
   } = app;
 
   const toggleDebugRide = () => {
@@ -277,6 +286,19 @@ export function setupDebug(app) {
       getLook,
       getRainAmount,
       getLampIntensity,
+    }),
+    createStressDebugModule({
+      renderer,
+      others,
+      createOther,
+      removeOther,
+      showBubble,
+      getCatNav,
+      getPlayerCount,
+      getPos,
+      keepAwake,
+      NAME_COLORS,
+      CAPS,
     }),
   ]);
 

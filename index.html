@@ -12,6 +12,8 @@
   .glass { position: fixed; background: rgba(10,11,16,.84); border: 1px solid rgba(255,255,255,.16);
            border-radius: 8px; backdrop-filter: blur(10px); color: #F2F2F5; box-shadow: 0 6px 24px rgba(0,0,0,.35);
            z-index: 3; } /* panels sit over what floats in the town: name tags, chat bubbles, the sit and wall prompts */
+  body.eco .glass { backdrop-filter: none; background: rgba(10,11,16,.92); }
+  @media (pointer: coarse) { .glass { backdrop-filter: none; background: rgba(10,11,16,.92); } }
   #place { left: 28px; top: 28px; padding: 12px 20px; }
   #place b { display: block; font-size: 22px; font-weight: 400; }
   #place small { color: #C4C6D4; font-size: 12px; }
@@ -71,7 +73,7 @@
      transparency where the arrow meets the bubble; the outline comes from the shape's drop-shadow */
   /* width: max-content keeps the bubble the same size anywhere: a fixed box without a width is squeezed
      into the space between its left and the screen edge, so it got narrower on small screens and near the edge */
-  .bubble { position: fixed; transform: translate(-50%, -100%); pointer-events: none; z-index: 2; width: max-content; max-width: 220px;
+  .bubble { position: fixed; left: 0; top: 0; will-change: transform; transform: translate(-50%, -100%); pointer-events: none; z-index: 2; width: max-content; max-width: 220px;
            transition: opacity .3s; filter: drop-shadow(0 0 0.6px rgba(255,255,255,.55)); }
   .bubble span { display: block; padding: 6px 10px 13px; font-size: 12px; line-height: 16px;
                 color: #F2F2F5; text-align: center; overflow-wrap: anywhere; background: rgba(0,0,0,.74);
@@ -87,7 +89,7 @@
   #mod-menu button { font: inherit; font-size: 11px; color: #F2F2F5; background: rgba(0,0,0,.4); cursor: pointer;
                      border: 1px solid rgba(255,255,255,.16); border-radius: 6px; padding: 4px 10px; text-align: left; }
   #mod-menu button:hover { border-color: #ff6b6b; color: #ff6b6b; }
-  .tag { position: fixed; transform: translate(-50%, -100%); pointer-events: none; z-index: 1; white-space: nowrap;
+  .tag { position: fixed; left: 0; top: 0; will-change: transform; transform: translate(-50%, -100%); pointer-events: none; z-index: 1; white-space: nowrap;
          font-size: 10px; line-height: 14px; color: #F2F2F5;
          /* no background: dark outline so it reads over light grass and lamp light */
          text-shadow: 1px 0 0 #000, -1px 0 0 #000, 0 1px 0 #000, 0 -1px 0 #000; }
@@ -107,7 +109,7 @@
   .tag.admin .who { color: #ffc95a; }
   .tag .who { display: block; text-align: center; color: var(--name, inherit); } /* --name: the colour the player picked */
   /* "press E to sit", floating over the nearest free seat */
-  #sit-prompt { position: fixed; transform: translate(-50%, -100%); cursor: pointer; z-index: 1; white-space: nowrap;
+  #sit-prompt { position: fixed; left: 0; top: 0; transform: translate(-50%, -100%); cursor: pointer; z-index: 1; white-space: nowrap;
                 font: inherit; font-size: 12px; line-height: 16px; color: #F2F2F5; padding: 5px 10px; border-radius: 6px;
                 background: rgba(10,11,16,.84); border: 1px solid rgba(255,255,255,.16); }
   #sit-prompt[hidden] { display: none; }
@@ -290,6 +292,7 @@
     <button id="switch-trainer" type="button" data-key="G" aria-label="switch trainer"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="4"/><path d="M3 21v-1a6 6 0 0 1 9-5.2M16 14l3 3-3 3M22 17h-7"/></svg></button>
     <button id="respawn" type="button" aria-label="back to the spawn"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/></svg></button>
     <button id="fullscreen" type="button" data-key="F" aria-label="full screen" hidden><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3M21 8V5a2 2 0 0 0-2-2h-3M3 16v3a2 2 0 0 0 2 2h3M16 21h3a2 2 0 0 0 2-2v-3"/></svg></button>
+    <button id="eco" type="button" data-key="L" aria-label="eco mode (30 fps)"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 20A7 7 0 0 1 9.8 6.1C15.5 5 17 4.48 19 2c1 2 2 4.18 2 8 0 5.5-4.78 10-10 10Z"/><path d="M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"/></svg></button>
     <button id="pause-btn" type="button" aria-label="pause"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5v14M15 5v14"/></svg></button>
     <button id="help" type="button" aria-label="shortcuts">?</button>
   </div>

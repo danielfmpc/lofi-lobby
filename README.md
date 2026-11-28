@@ -42,6 +42,7 @@ Open the URL, pick a trainer and press **enter the room**: the click is what let
 | N or the day/night button | switch between night, day and automatic day/night cycle for you |
 | R or the rain button | turn the rain on or off for you (greyer sky by day) |
 | F or the full screen button | enter or leave full screen (hidden where the browser can't, e.g. iPhone) |
+| L or the eco button | toggle Eco mode (30 fps cap and no panel blur) |
 | B, or E (or a tap on the note) by the board | open the message wall: read the notes, like them and pin your own (most liked first, or newest) |
 | E (or a tap on the note) at the pond's edge, facing the water | fish: choose how many minutes to focus; when the time is up a fish bites and you have a minute to press E again and pull it in (everyone sees your line out; the timer is yours) |
 | Space | pause the music for you only |
@@ -67,12 +68,13 @@ Open the URL, pick a trainer and press **enter the room**: the click is what let
 | Presence | `pagehide` beacon (`/api/leave` with per-socket token), zero-wake `ping`/`pong` heartbeat + DO `alarm()`, and strict pre-`hello` gating | [ADR 006](docs/adr/006-reliable-disconnect-and-stale-socket-cleanup.md) |
 | Day / night / auto | Client-side 3-state switch (`night`, `day`, `auto`): 10-minute keyframed cycle (`DEFAULT_CYCLE_MS` in `src/main.js`), persisted in `localStorage`; dev-only module in `src/cycle-debug.js` | [ADR 008](docs/adr/008-client-side-day-night-cycle.md) |
 | Town cats | Five clock-synced procedural cats roaming a whole-town BFS NavGrid (`src/cat.js`), fed with `E`, with DO heartbeat lottery for head-perching (`worker/index.js`) | [ADR 009](docs/adr/009-free-roaming-town-cats-and-head-perching.md) |
-| Debug hub | Single dev-only `import.meta.env.DEV` hub (`src/debug.js`) behind one toolbar bug button, hosting modular debug views (`src/cat-debug.js`, `src/cycle-debug.js`) and stripped from production builds | [ADR 010](docs/adr/010-dev-only-modular-debug-hub.md) |
+| Debug hub | Single dev-only `import.meta.env.DEV` hub (`src/debug.js`) behind one toolbar bug button, hosting modular debug views (`src/cat-debug.js`, `src/cycle-debug.js`, `src/stress-debug.js`) and stripped from production builds | [ADR 010](docs/adr/010-dev-only-modular-debug-hub.md) |
 | Carousel | Built in code where pines are taken out of the town as it loads; turned by the room's clock (`roomNow()`), so its horses are just seats 16..23 and riding sends no messages; nothing that turns casts a shadow | [ADR 011](docs/adr/011-christmas-carousel.md) |
 | Ferris wheel and fair lamps | The carousel's pattern right of the pond: gondolas are seats 24..31, boarded only near the bottom, placed upright each frame from the room's clock; four lamps around the rides whose light casts no shadow | [ADR 012](docs/adr/012-ferris-wheel-and-fair-lamps.md) |
 | Roller coaster | Over the pond, in 42 s cycles by the room's clock: 12 s at the station to board seats 32..36, one per car of a level 5-car train (the server checks the time), 30 s along a curve whose speed comes from a precomputed table; riders get off when the cycle ends | [ADR 013](docs/adr/013-roller-coaster-in-cycles.md) |
-| Message wall | Notes go over HTTP (`/api/notes`), not the WebSocket, and live in the room object's storage: **one key per note**, so the wall has no size limit and is read a page at a time | [SECURITY.md](SECURITY.md) |
 | Accounts, friends, private chat | An account is a GitHub login (device flow), numbered in the order they were made and named by that number everywhere; medals are rules over the account; friends need both sides, and so does a private chat with a non-friend (an invitation); private chat goes through the room's WebSocket and its storage keeps the last 50 messages per pair (`worker/social.js`, `src/social.js`) | [ADR 014](docs/adr/014-accounts-friends-and-private-chat.md) |
+| Client performance & Eco mode | Spatial XZ index + lazy `0.5`-unit terrain cache, demand-driven shadows (`512×512`, `distance = 16` on road lamps, blob shadows on animals), frustum culling for lights and rides, merged static benches/lamps, GPU fireflies, sprite-sheet cache, `translate3d` overlays, adaptive 30 fps Eco/idle mode, and dev-only `src/stress-debug.js` | [ADR 015](docs/adr/015-client-performance-optimizations-and-eco-mode.md) |
+| Message wall | Notes go over HTTP (`/api/notes`), not the WebSocket, and live in the room object's storage: **one key per note**, so the wall has no size limit and is read a page at a time | [SECURITY.md](SECURITY.md) |
 | Admin | Secret `ADMIN_PASSWORD`, checked in the room object in constant time, few tries per connection | [SECURITY.md](SECURITY.md) |
 
 **Limits of this design.** There is a single room (`lobby`), and a room is one object, so it holds a few dozen players (capped at 100); growing past that would mean opening more rooms, not a bigger one. Positions are relayed, not simulated on the server, so a modified client can teleport; nothing in the lobby is worth cheating for. The YouTube player can't be fully controlled (ads, embeds disabled by the owner): those videos are skipped. It plays off screen, which YouTube's terms for embedded players do not expect.
@@ -90,6 +92,7 @@ src/
   debug.js          dev-only modular debug hub (stripped from production builds)
   cat-debug.js      dev-only cat & NavGrid debug module (stripped from production builds)
   cycle-debug.js    dev-only cycle debug module (stripped from production builds)
+  stress-debug.js   dev-only stress test module (stripped from production builds)
   radio.js          YouTube player (off screen) synced by the clock or by the room's radio command
   social.js         account, profile and medals, friends list, private chat tabs
 public/assets/      Twinleaf FBX model, textures and male/female trainer sheets

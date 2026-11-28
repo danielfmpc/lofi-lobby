@@ -221,7 +221,10 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color("#070a18");
 scene.fog = new THREE.Fog("#070a18", 50, 140);
 
-const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 1000);
+const camera = new THREE.PerspectiveCamera(30, 1, 2, 165);
+const _frustum = new THREE.Frustum();
+const _projScreenMatrix = new THREE.Matrix4();
+const _cullSphere = new THREE.Sphere();
 
 // Night: weak bluish moonlight; the lamp posts are the main light.
 // Colors and intensities here are overwritten by the day/night look (applyLook).
@@ -230,6 +233,8 @@ scene.add(skyLight);
 const sun = new THREE.DirectionalLight("#7f95d8", 0.45); // moon (sun by day)
 sun.position.set(40, 80, 30);
 sun.castShadow = true;
+sun.shadow.autoUpdate = false;
+sun.shadow.needsUpdate = true;
 // 1024 is enough for pixel-art shadows over the whole town; 2048 cost ~42 MB more of GPU memory
 sun.shadow.mapSize.set(1024, 1024);
 Object.assign(sun.shadow.camera, {
@@ -244,6 +249,12 @@ Object.assign(sun.shadow.camera, {
 sun.shadow.bias = -0.0005;
 sun.shadow.normalBias = 0.05;
 scene.add(sun);
+let sunShadowStale = true;
+const _lastSunPos = new THREE.Vector3(40, 80, 30);
+let _lastSunOn = true;
+function markSunShadowStale() {
+  sunShadowStale = true;
+}
 
 function resize() {
   renderer.setSize(innerWidth, innerHeight);
@@ -338,6 +349,7 @@ function prepareTown(fbx) {
     scene.add(fbx);
     townMeshes = [];
     fbx.traverse((o) => o.isMesh && townMeshes.push(o));
+    buildTerrainIndex();
     computePondBox();
     placeFair(); // before the lamps, benches and capybara look for open ground around it
     fbx.traverse((o) => {
@@ -357,6 +369,7 @@ function prepareTown(fbx) {
     placeOwl();
     mergeTown(fbx);
     markLampShadowsStale(); // the town, the lamps and everything around them just took their places
+    markSunShadowStale();
     buildCatNavGrid();
 }
 
@@ -636,57 +649,53 @@ const glowTexture = (() => {
   ctx.fillRect(0, 0, 64, 64);
   return new THREE.CanvasTexture(cv);
 })();
+const lampShadowGeo = (() => {
+  const base = new THREE.CylinderGeometry(0.8, 1, 0.7, 6).translate(0, 0.35, 0);
+  const pole = new THREE.CylinderGeometry(0.3, 0.36, 7, 6).translate(0, 4, 0);
+  const merged = mergeGeometries([base, pole]);
+  base.dispose();
+  pole.dispose();
+  return merged;
+})();
+const lampTopGeo = (() => {
+  const arm = new THREE.BoxGeometry(1.4, 0.28, 0.28).translate(0, 7.4, 0);
+  const cap = new THREE.ConeGeometry(1.2, 0.8, 4).rotateY(Math.PI / 4).translate(0, 9.3, 0);
+  const merged = mergeGeometries([arm, cap]);
+  arm.dispose();
+  cap.dispose();
+  return merged;
+})();
+const lampLanternGeo = new THREE.CylinderGeometry(0.8, 0.6, 1.4, 4).rotateY(Math.PI / 4).translate(0, 8.2, 0);
+const lampGlowMat = new THREE.SpriteMaterial({
+  map: glowTexture,
+  color: "#ffd45e",
+  transparent: true,
+  opacity: 0.35,
+  depthWrite: false,
+  blending: THREE.AdditiveBlending,
+});
 function createLampPost(x, z) {
   const g = new THREE.Group();
-  const base = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.8, 1, 0.7, 6),
-    ironMaterial,
-  );
-  base.position.y = 0.35;
-  const pole = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.3, 0.36, 7, 6),
-    ironMaterial,
-  );
-  pole.position.y = 4;
-  const arm = new THREE.Mesh(
-    new THREE.BoxGeometry(1.4, 0.28, 0.28),
-    ironMaterial,
-  );
-  arm.position.y = 7.4;
-  const lantern = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.8, 0.6, 1.4, 4),
-    lightMaterial,
-  );
-  lantern.position.y = 8.2;
-  lantern.rotation.y = Math.PI / 4;
-  const cap = new THREE.Mesh(new THREE.ConeGeometry(1.2, 0.8, 4), ironMaterial);
-  cap.position.y = 9.3;
-  cap.rotation.y = Math.PI / 4;
   // only base and pole cast shadows; the top wraps the bulb and would darken everything
-  [base, pole].forEach((m) => (m.castShadow = true));
-  const light = new THREE.PointLight("#ffc95a", 150, 22, 1.6); // ~2700K, warm yellow
+  const postShadow = new THREE.Mesh(lampShadowGeo, ironMaterial);
+  postShadow.castShadow = true;
+  const postTop = new THREE.Mesh(lampTopGeo, ironMaterial);
+  const lantern = new THREE.Mesh(lampLanternGeo, lightMaterial);
+  const light = new THREE.PointLight("#ffc95a", 150, 16, 1.6); // ~2700K, warm yellow
   light.position.set(0.9, 7.6, 0); // a bit out from the pole, under the arm
   light.castShadow = true;
-  // a point light's shadow is 6 maps (one per cube face), colour and depth: ~13 MB of GPU memory
-  // each at 512, ~50 MB at 1024 for no visible gain once the soft edge (radius) blurs it
+  // a point light's shadow is 6 maps (one per cube face): 512 keeps smooth edges when walking
   light.shadow.mapSize.set(512, 512);
+  light.shadow.camera.far = 16;
   light.shadow.bias = -0.0005;
   light.shadow.normalBias = 0.05;
   light.shadow.radius = 4;
-  const glow = new THREE.Sprite(
-    new THREE.SpriteMaterial({
-      map: glowTexture,
-      color: "#ffd45e",
-      transparent: true,
-      opacity: 0.35,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-    }),
-  );
+  const glow = new THREE.Sprite(lampGlowMat);
   glow.scale.set(6, 6, 1);
   glow.position.y = 8.2;
-  g.add(glow);
-  g.add(base, pole, arm, lantern, cap, light);
+  g.userData.light = light;
+  g.userData.glow = glow;
+  g.add(glow, postShadow, postTop, lantern, light);
   g.position.set(x, 0, z);
   scene.add(g);
   return g;
@@ -717,7 +726,6 @@ const fairPosts = FAIR_POSTS.map(([x, z, ride]) => {
   return p;
 });
 lampPosts.push(...fairPosts); // they light up at dusk like the others, and nobody walks through them
-const lampPostSolids = lampPosts.flatMap((p) => p.children.filter((c) => c.isMesh));
 // message wall: a cork board under the lamp light, in front of the lower-left house's window
 const BOARD_AT = [-7.5, 15];
 const board = createBoard(scene);
@@ -737,39 +745,55 @@ const FACING = { down: [0, 1], up: [0, -1], left: [-1, 0], right: [1, 0] };
 const benches = []; // { x, y, z, face }
 const benchBoxes = [];
 // Park bench in the town's low-poly look: wooden slats in two tones over cast-iron
-// ends, the same iron as the lamp posts.
-const woodLight = new THREE.MeshLambertMaterial({ color: "#b07a45", flatShading: true });
-const woodDark = new THREE.MeshLambertMaterial({ color: "#8a5a34", flatShading: true });
-function createBench(x, y, z, face) {
-  const g = new THREE.Group();
-  const part = (mat, w, h, d, px, py, pz, tilt = 0) => {
-    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
-    m.position.set(px, py, pz);
-    m.rotation.x = tilt;
-    m.castShadow = m.receiveShadow = true;
-    g.add(m);
+// ends, the same iron as the lamp posts. Merged into a single shared geometry (1 draw call per bench).
+const benchMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+const benchGeo = (() => {
+  const _bm = new THREE.Matrix4();
+  const _bq = new THREE.Quaternion();
+  const _be = new THREE.Euler();
+  const _bc = new THREE.Color();
+  const _bp = new THREE.Vector3();
+  const _bs = new THREE.Vector3(1, 1, 1);
+  const parts = [];
+  const part = (color, w, h, d, px, py, pz, tilt = 0) => {
+    const g = new THREE.BoxGeometry(w, h, d).toNonIndexed();
+    g.applyMatrix4(_bm.compose(_bp.set(px, py, pz), _bq.setFromEuler(_be.set(tilt, 0, 0)), _bs));
+    const count = g.attributes.position.count;
+    const col = new Float32Array(count * 3);
+    _bc.set(color);
+    for (let i = 0; i < count; i++) _bc.toArray(col, i * 3);
+    g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+    parts.push(g);
   };
   // local front is +z. Iron ends: front leg, back leg rising into the backrest,
   // rail under the seat, armrest on top
   for (const sx of [-2.15, 2.15]) {
-    part(ironMaterial, 0.22, 1.45, 0.22, sx, 0.72, 0.55);
-    part(ironMaterial, 0.22, 2.75, 0.22, sx, 1.37, -0.68, -0.08);
-    part(ironMaterial, 0.2, 0.18, 1.45, sx, 1.33, -0.05);
-    part(ironMaterial, 0.26, 0.16, 1.2, sx, 2.15, 0.05);
+    part("#2f3b45", 0.22, 1.45, 0.22, sx, 0.72, 0.55);
+    part("#2f3b45", 0.22, 2.75, 0.22, sx, 1.37, -0.68, -0.08);
+    part("#2f3b45", 0.2, 0.18, 1.45, sx, 1.33, -0.05);
+    part("#2f3b45", 0.26, 0.16, 1.2, sx, 2.15, 0.05);
   }
   // seat: three slats with gaps, alternating tones (top at ~1.6, where a sitter's hips go)
   [0.5, 0, -0.5].forEach((sz, i) =>
-    part(i % 2 ? woodDark : woodLight, 4.5, 0.18, 0.4, 0, 1.51, sz),
+    part(i % 2 ? "#8a5a34" : "#b07a45", 4.5, 0.18, 0.4, 0, 1.51, sz),
   );
   // backrest: two slats leaning back a little
-  part(woodDark, 4.5, 0.36, 0.14, 0, 2.0, -0.78, -0.08);
-  part(woodLight, 4.5, 0.36, 0.14, 0, 2.55, -0.83, -0.08);
-  g.position.set(x, y, z);
-  g.rotation.y = { down: 0, right: Math.PI / 2, up: Math.PI, left: -Math.PI / 2 }[face];
-  scene.add(g);
-  g.updateMatrixWorld(true);
+  part("#8a5a34", 4.5, 0.36, 0.14, 0, 2.0, -0.78, -0.08);
+  part("#b07a45", 4.5, 0.36, 0.14, 0, 2.55, -0.83, -0.08);
+  const merged = mergeGeometries(parts);
+  parts.forEach((p) => p.dispose());
+  return merged;
+})();
+function createBench(x, y, z, face) {
+  const m = new THREE.Mesh(benchGeo, benchMaterial);
+  m.castShadow = m.receiveShadow = true;
+  m.position.set(x, y, z);
+  m.rotation.y = { down: 0, right: Math.PI / 2, up: Math.PI, left: -Math.PI / 2 }[face];
+  scene.add(m);
+  m.updateMatrixWorld(true);
+  m.matrixAutoUpdate = false;
   benches.push({ x, y, z, face });
-  const box = new THREE.Box3().setFromObject(g);
+  const box = new THREE.Box3().setFromObject(m);
   solidBoxes.push(box); // nobody walks through it
   benchBoxes.push(box); // and it hides whoever stands behind it (updateOcclusion)
 }
@@ -1027,7 +1051,6 @@ const fromLook = makeLook(NIGHT_SPEC);
 const targetLook = makeLook(NIGHT_SPEC);
 
 const lampLights = lampPosts.flatMap((p) => p.children.filter((c) => c.isPointLight));
-const lampGlows = lampPosts.flatMap((p) => p.children.filter((c) => c.isSprite));
 
 // ---- Lamp shadows on demand ----
 // A lamp's shadow is 6 renders (one per cube face) of everything within its reach, which three.js
@@ -1043,22 +1066,25 @@ function markLampShadowsStale() {
   for (const l of lampLights) l.userData.shadowStale = true;
 }
 const SHADOW_REACH = 3; // a trainer's sprite is 5 units tall: past the light's range it can still reach in
-const SHADOW_STEP = 0.25; // about one texel of a lamp's 512 shadow map, a few units from the lamp
+const SHADOW_STEP = 0.05; // smooth per-frame shadow updates while walking without redrawing when still
 const drawnMovers = new Map(); // object -> { x, y, z, look, px, py, pz }: where its shadow was drawn, and last frame's spot
 const _lampAt = new THREE.Vector3();
+const _seenMovers = new Set();
+const _changedSpots = [];
 function updateLampShadows(movers) {
   // where a shadow must change this frame: where it was drawn and where it goes (one that left, only the old)
-  const changed = [];
-  const seen = new Set();
-  for (const o of movers) {
-    seen.add(o);
+  _changedSpots.length = 0;
+  _seenMovers.clear();
+  for (let i = 0; i < movers.length; i++) {
+    const o = movers[i];
+    _seenMovers.add(o);
     const { x, y, z } = o.position;
-    // the frame of the sheet it casts its shadow with (the capybara uses its own material's)
+    // the frame of the sheet it casts its shadow with
     const map = (o.customDistanceMaterial || o.material)?.map;
     const look = [o.visible, map?.id, map?.image?.width, map?.offset.x, map?.offset.y, map?.repeat.x].join();
     const d = drawnMovers.get(o);
     if (!d) {
-      changed.push({ x, z });
+      _changedSpots.push({ x, z });
       drawnMovers.set(o, { x, y, z, look, px: x, py: y, pz: z });
       continue;
     }
@@ -1066,21 +1092,57 @@ function updateLampShadows(movers) {
     const stopped = x === d.px && y === d.py && z === d.pz;
     Object.assign(d, { px: x, py: y, pz: z });
     if (look === d.look && away < SHADOW_STEP && !(stopped && away > 0)) continue;
-    changed.push({ x: d.x, z: d.z }, { x, z });
+    _changedSpots.push({ x: d.x, z: d.z }, { x, z });
     Object.assign(d, { x, y, z, look });
   }
-  for (const [o, d] of drawnMovers) if (!seen.has(o)) changed.push(d), drawnMovers.delete(o);
+  for (const [o, d] of drawnMovers) if (!_seenMovers.has(o)) _changedSpots.push(d), drawnMovers.delete(o);
+  const anyMoverChanged = _changedSpots.length > 0;
   for (const l of lampLights) {
     if (l.intensity <= 0) {
-      l.userData.shadowStale = true; // off: redraw once it comes back on
+      l.userData.shadowStale = true; // off or out of view: redraw once it comes back on
       continue;
     }
     l.getWorldPosition(_lampAt);
     const reach = l.distance + SHADOW_REACH;
-    if (l.userData.shadowStale || changed.some((c) => Math.hypot(c.x - _lampAt.x, c.z - _lampAt.z) < reach)) {
+    _cullSphere.set(_lampAt, reach);
+    if (!_frustum.intersectsSphere(_cullSphere)) {
+      l.userData.shadowStale = true;
+      continue;
+    }
+    if (l.userData.shadowStale || (anyMoverChanged && _changedSpots.some((c) => Math.hypot(c.x - _lampAt.x, c.z - _lampAt.z) < reach))) {
       l.shadow.needsUpdate = true; // three.js clears it once drawn
       l.userData.shadowStale = false;
     }
+  }
+  if (sun.intensity > 0.01) {
+    if (sunShadowStale || anyMoverChanged) {
+      sun.shadow.needsUpdate = true;
+      sunShadowStale = false;
+    }
+  } else {
+    sunShadowStale = true;
+  }
+}
+function cullLights() {
+  for (const p of lampPosts) {
+    const light = p.userData.light;
+    const glow = p.userData.glow;
+    const target = light.userData.targetIntensity ?? 0;
+    if (target <= 0) {
+      light.intensity = 0;
+      glow.visible = false;
+      continue;
+    }
+    light.getWorldPosition(_lampAt);
+    _cullSphere.set(_lampAt, light.distance + 4);
+    const visible = _frustum.intersectsSphere(_cullSphere);
+    light.intensity = visible ? target : 0;
+    glow.visible = visible && lampGlowMat.opacity > 0.005;
+  }
+  if (benchGlow.intensity > 0) {
+    _lampAt.set(candles.position.x, candles.position.y + 1.1, candles.position.z);
+    _cullSphere.set(_lampAt, benchGlow.distance + 2);
+    if (!_frustum.intersectsSphere(_cullSphere)) benchGlow.intensity = 0;
   }
 }
 // A few candles on the grass between the two pond benches, so sitters aren't in the dark (the posts
@@ -1131,9 +1193,18 @@ function applyLook(look) {
   skyLight.intensity = look.skyIntensity * gloom;
   sun.color.copy(look.sunColor);
   sun.intensity = look.sunIntensity * gloom;
-  for (const l of lampLights) l.intensity = look.lampIntensity * (l.userData.dim ?? 1);
+  if (sun.position.distanceToSquared(_lastSunPos) > 0.0625 || (sun.intensity > 0.01) !== _lastSunOn) {
+    _lastSunPos.copy(sun.position);
+    _lastSunOn = sun.intensity > 0.01;
+    markSunShadowStale();
+  }
+  for (const l of lampLights) {
+    const target = look.lampIntensity * (l.userData.dim ?? 1);
+    l.userData.targetIntensity = target;
+    l.intensity = target;
+  }
   candleLight = look.lampIntensity * 0.06;
-  for (const g of lampGlows) g.material.opacity = look.glowOpacity;
+  lampGlowMat.opacity = look.glowOpacity;
   lightMaterial.color.copy(look.lantern);
   waterMaterial.color.copy(look.waterColor);
   waterMaterial.emissive.copy(look.waterEmissive);
@@ -1317,21 +1388,16 @@ rainMesh.visible = false;
 scene.add(rainMesh);
 
 // Where a drop stops: highest surface (so it stops on roofs), and whether it is the pond.
-// Cached on a 1-unit grid; at most a few new raycasts per frame.
-const surfaceCache = new Map();
+// Backed by the O(1) terrain cache; at most a few uncached lookups per frame.
 let surfaceBudget = 0;
+const _surfOut = { y: 0, water: false };
 function surfaceAt(x, z) {
-  const key = Math.round(x) * 1000 + Math.round(z);
-  let s = surfaceCache.get(key);
-  if (s) return s;
-  if (!townMeshes.length || surfaceBudget <= 0) return null;
-  surfaceBudget--;
-  ray.set(new THREE.Vector3(Math.round(x), 200, Math.round(z)), DOWN);
-  const hits = ray.intersectObjects(townMeshes, false);
-  const wet = hits.find((h) => waterMeshes.has(h.object));
-  s = wet ? { y: wet.point.y, water: true } : hits[0] ? { y: hits[0].point.y, water: false } : { y: 0, water: false };
-  surfaceCache.set(key, s);
-  return s;
+  if (!townMeshes.length) return null;
+  const hit = sampleTerrain(x, z, true);
+  if (!hit) return null;
+  _surfOut.y = hit.surfY;
+  _surfOut.water = hit.hasWater;
+  return _surfOut;
 }
 
 // Splashes: expanding rings that fade (small on the ground, bigger on the pond).
@@ -1378,6 +1444,7 @@ splashMesh.frustumCulled = false;
 splashMesh.visible = false;
 splashMesh.renderOrder = 10; // after the water and its light patches
 scene.add(splashMesh);
+let splashesDirty = false;
 function splash(x, y, z, water) {
   const i = splashNext;
   splashNext = (splashNext + 1) % SPLASH;
@@ -1386,6 +1453,7 @@ function splash(x, y, z, water) {
   splashPos[i * 3 + 2] = z;
   splashAge[i] = 0;
   splashSize[i] = water ? 2.2 + Math.random() * 1.0 : 0.7 + Math.random() * 0.4;
+  splashesDirty = true;
 }
 
 const wetMaterials = [];
@@ -1422,6 +1490,7 @@ function prepareWet() {
     o.material = Array.isArray(o.material) ? o.material.map(swap) : swap(o.material);
   }
   applyWet();
+  markSunShadowStale();
 }
 const WET_SHINE = new THREE.Color("#8a96aa");
 function applyWet() {
@@ -1447,6 +1516,7 @@ function updateRain(dt) {
   rainUniforms.uOpacity.value = 0.45 * rainAmount;
   rainUniforms.uColor.value.copy(RAIN_NIGHT).lerp(RAIN_DAY, dayAmount);
   surfaceBudget = 40;
+  splashesDirty = false;
   const { radius, height, fall, wind } = RAIN;
   const top = pos.y + height;
   for (let i = 0; i < RAIN.count; i++) {
@@ -1482,10 +1552,18 @@ function updateRain(dt) {
     rainLines[k + 5] = z;
   }
   rainGeometry.attributes.position.needsUpdate = true;
-  for (let i = 0; i < SPLASH; i++) if (splashAge[i] < 1) splashAge[i] = Math.min(1, splashAge[i] + dt * 3.2);
-  splashGeometry.attributes.offset.needsUpdate = true;
-  splashGeometry.attributes.age.needsUpdate = true;
-  splashGeometry.attributes.size.needsUpdate = true;
+  let anyAge = false;
+  for (let i = 0; i < SPLASH; i++) {
+    if (splashAge[i] < 1) {
+      splashAge[i] = Math.min(1, splashAge[i] + dt * 3.2);
+      anyAge = true;
+    }
+  }
+  if (splashesDirty) {
+    splashGeometry.attributes.offset.needsUpdate = true;
+    splashGeometry.attributes.size.needsUpdate = true;
+  }
+  if (anyAge || splashesDirty) splashGeometry.attributes.age.needsUpdate = true;
 }
 const rainBtn = document.querySelector("#rain");
 function drawRain() {
@@ -1513,7 +1591,6 @@ addEventListener("keydown", (e) => {
 // (same fade as the look). Only for you, nothing goes to the server.
 const FIREFLIES = { count: MOBILE ? 40 : 90, margin: 12, wander: 1.5 };
 const fireflyBase = new Float32Array(FIREFLIES.count * 3); // where each one hovers around
-const fireflyPos = new Float32Array(FIREFLIES.count * 3);
 const fireflyPhase = new Float32Array(FIREFLIES.count);
 const fireflySpeed = new Float32Array(FIREFLIES.count);
 for (let i = 0; i < FIREFLIES.count; i++) {
@@ -1521,10 +1598,10 @@ for (let i = 0; i < FIREFLIES.count; i++) {
   fireflySpeed[i] = 0.6 + Math.random() * 0.8;
 }
 const fireflyGeometry = new THREE.BufferGeometry();
-fireflyGeometry.setAttribute("position", new THREE.BufferAttribute(fireflyPos, 3).setUsage(THREE.DynamicDrawUsage));
+fireflyGeometry.setAttribute("position", new THREE.BufferAttribute(fireflyBase, 3));
 fireflyGeometry.setAttribute("phase", new THREE.BufferAttribute(fireflyPhase, 1));
 fireflyGeometry.setAttribute("speed", new THREE.BufferAttribute(fireflySpeed, 1));
-const fireflyUniforms = { uOpacity: { value: 0 }, uTime: { value: 0 }, uColor: { value: new THREE.Color("#d8ff8a") } };
+const fireflyUniforms = { uOpacity: { value: 0 }, uTime: { value: 0 }, uWander: { value: FIREFLIES.wander }, uColor: { value: new THREE.Color("#d8ff8a") } };
 const fireflyMesh = new THREE.Points(
   fireflyGeometry,
   new THREE.ShaderMaterial({
@@ -1532,11 +1609,17 @@ const fireflyMesh = new THREE.Points(
     transparent: true,
     depthWrite: false,
     blending: THREE.AdditiveBlending,
-    vertexShader: `attribute float phase; attribute float speed; uniform float uTime; varying float vGlow;
+    vertexShader: `attribute float phase; attribute float speed; uniform float uTime; uniform float uWander; varying float vGlow;
       void main() {
+        float s = speed * 0.4;
+        vec3 p = position + vec3(
+          uWander * sin(uTime * s + phase) * cos(uTime * s * 0.7),
+          0.5 * sin(uTime * s * 1.3 + phase * 2.0),
+          uWander * cos(uTime * s * 0.9 + phase)
+        );
         // blinks: mostly dim, a short bright pulse now and then
         vGlow = pow(0.5 + 0.5 * sin(uTime * speed * 1.7 + phase), 4.0);
-        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vec4 mv = modelViewMatrix * vec4(p, 1.0);
         gl_PointSize = (300.0 + 200.0 * vGlow) / -mv.z;
         gl_Position = projectionMatrix * mv;
       }`,
@@ -1548,7 +1631,7 @@ const fireflyMesh = new THREE.Points(
       }`,
   }),
 );
-fireflyMesh.frustumCulled = false; // positions move every frame
+fireflyMesh.frustumCulled = false; // animated in vertex shader around base positions
 fireflyMesh.visible = false;
 scene.add(fireflyMesh);
 let firefliesPlaced = false;
@@ -1566,26 +1649,15 @@ function placeFireflies() {
     fireflyBase[i * 3 + 2] = z;
     i++;
   }
+  fireflyGeometry.attributes.position.needsUpdate = true;
   firefliesPlaced = true;
 }
 function updateFireflies() {
   const opacity = THREE.MathUtils.clamp(1 - dayAmount * 2, 0, 1) * (1 - rainAmount);
   fireflyMesh.visible = firefliesPlaced && opacity > 0.01;
   if (!fireflyMesh.visible) return;
-  const t = waterUniforms.uTime.value;
   fireflyUniforms.uOpacity.value = opacity;
-  fireflyUniforms.uTime.value = t;
-  const w = FIREFLIES.wander;
-  for (let i = 0; i < FIREFLIES.count; i++) {
-    const j = i * 3;
-    const p = fireflyPhase[i];
-    const s = fireflySpeed[i] * 0.4;
-    // slow wandering loop around the base, a little up and down
-    fireflyPos[j] = fireflyBase[j] + w * Math.sin(t * s + p) * Math.cos(t * s * 0.7);
-    fireflyPos[j + 1] = fireflyBase[j + 1] + 0.5 * Math.sin(t * s * 1.3 + p * 2);
-    fireflyPos[j + 2] = fireflyBase[j + 2] + w * Math.cos(t * s * 0.9 + p);
-  }
-  fireflyGeometry.attributes.position.needsUpdate = true;
+  fireflyUniforms.uTime.value = waterUniforms.uTime.value;
 }
 
 let townMeshes = [];
@@ -1620,33 +1692,140 @@ function inPond(x, z) {
     z < pondBox.max.z
   );
 }
-function isWater(x, z) {
-  if (!waterMeshes.size) return false;
-  ray.set(new THREE.Vector3(x, 200, z), DOWN);
-  const hits = ray.intersectObjects(townMeshes, false);
-  return (
-    hits.length > 0 &&
-    (waterMeshes.has(hits[0].object) || edgeMeshes.has(hits[0].object))
-  );
-}
 const ray = new THREE.Raycaster();
 const DOWN = new THREE.Vector3(0, -1, 0);
+const _rayOrigin = new THREE.Vector3();
+const TERRAIN_BUCKET = 5;
+const TERRAIN_CELL = 0.5;
+const FLAG_CACHED = 1;
+const FLAG_WATER_OR_EDGE = 2;
+const FLAG_HAS_WATER = 4;
+const EMPTY_MESHES = [];
+let terrainIndex = null;
+let terrainCache = null;
+
+function buildTerrainIndex() {
+  if (!townMeshes.length) {
+    terrainIndex = null;
+    terrainCache = null;
+    return;
+  }
+  const minX = Math.floor(townBox.min.x) - 1;
+  const maxX = Math.ceil(townBox.max.x) + 1;
+  const minZ = Math.floor(townBox.min.z) - 1;
+  const maxZ = Math.ceil(townBox.max.z) + 1;
+  const cols = Math.max(1, Math.ceil((maxX - minX) / TERRAIN_BUCKET));
+  const rows = Math.max(1, Math.ceil((maxZ - minZ) / TERRAIN_BUCKET));
+  const buckets = Array.from({ length: cols * rows }, () => []);
+  const mBox = new THREE.Box3();
+  for (let i = 0; i < townMeshes.length; i++) {
+    const m = townMeshes[i];
+    mBox.setFromObject(m);
+    const x0 = Math.max(0, Math.floor((mBox.min.x - minX) / TERRAIN_BUCKET));
+    const x1 = Math.min(cols - 1, Math.floor((mBox.max.x - minX) / TERRAIN_BUCKET));
+    const z0 = Math.max(0, Math.floor((mBox.min.z - minZ) / TERRAIN_BUCKET));
+    const z1 = Math.min(rows - 1, Math.floor((mBox.max.z - minZ) / TERRAIN_BUCKET));
+    for (let bz = z0; bz <= z1; bz++) {
+      const rowOff = bz * cols;
+      for (let bx = x0; bx <= x1; bx++) buckets[rowOff + bx].push(m);
+    }
+  }
+  terrainIndex = { minX, minZ, cols, rows, buckets };
+  const cCols = Math.max(1, Math.ceil((maxX - minX) / TERRAIN_CELL) + 1);
+  const cRows = Math.max(1, Math.ceil((maxZ - minZ) / TERRAIN_CELL) + 1);
+  const n = cCols * cRows;
+  terrainCache = {
+    minX,
+    minZ,
+    cols: cCols,
+    rows: cRows,
+    flags: new Uint8Array(n),
+    topY: new Float32Array(n),
+    groundY: new Float32Array(n),
+    surfY: new Float32Array(n),
+    waterY: new Float32Array(n),
+  };
+}
+function meshesAt(x, z) {
+  if (!terrainIndex) return townMeshes;
+  const bx = Math.floor((x - terrainIndex.minX) / TERRAIN_BUCKET);
+  const bz = Math.floor((z - terrainIndex.minZ) / TERRAIN_BUCKET);
+  if (bx < 0 || bx >= terrainIndex.cols || bz < 0 || bz >= terrainIndex.rows) return EMPTY_MESHES;
+  return terrainIndex.buckets[bz * terrainIndex.cols + bx];
+}
+const _terrainOut = { topY: 0, groundY: 0, surfY: 0, waterY: 0, isWaterOrEdge: false, hasWater: false };
+function sampleTerrain(x, z, respectBudget = false) {
+  if (!townMeshes.length) return null;
+  if (!terrainCache) {
+    if (respectBudget && surfaceBudget <= 0) return null;
+    if (respectBudget) surfaceBudget--;
+    ray.set(_rayOrigin.set(x, 200, z), DOWN);
+    const hits = ray.intersectObjects(meshesAt(x, z), false);
+    const wet = hits.find((h) => waterMeshes.has(h.object));
+    const topHit = hits.find((h) => !edgeMeshes.has(h.object));
+    _terrainOut.topY = topHit ? topHit.point.y : 0;
+    _terrainOut.groundY = hits.length ? hits[hits.length - 1].point.y : 0;
+    _terrainOut.surfY = wet ? wet.point.y : hits[0] ? hits[0].point.y : 0;
+    _terrainOut.waterY = wet ? wet.point.y : 0;
+    _terrainOut.isWaterOrEdge = hits.length > 0 && (waterMeshes.has(hits[0].object) || edgeMeshes.has(hits[0].object));
+    _terrainOut.hasWater = !!wet;
+    return _terrainOut;
+  }
+  const c = terrainCache;
+  const ix = Math.round((x - c.minX) / TERRAIN_CELL);
+  const iz = Math.round((z - c.minZ) / TERRAIN_CELL);
+  if (ix < 0 || ix >= c.cols || iz < 0 || iz >= c.rows) {
+    _terrainOut.topY = 0;
+    _terrainOut.groundY = 0;
+    _terrainOut.surfY = 0;
+    _terrainOut.waterY = 0;
+    _terrainOut.isWaterOrEdge = false;
+    _terrainOut.hasWater = false;
+    return _terrainOut;
+  }
+  const idx = iz * c.cols + ix;
+  if ((c.flags[idx] & FLAG_CACHED) === 0) {
+    if (respectBudget && surfaceBudget <= 0) return null;
+    if (respectBudget) surfaceBudget--;
+    const cx = c.minX + ix * TERRAIN_CELL;
+    const cz = c.minZ + iz * TERRAIN_CELL;
+    ray.set(_rayOrigin.set(cx, 200, cz), DOWN);
+    const hits = ray.intersectObjects(meshesAt(cx, cz), false);
+    const wet = hits.find((h) => waterMeshes.has(h.object));
+    const topHit = hits.find((h) => !edgeMeshes.has(h.object));
+    c.topY[idx] = topHit ? topHit.point.y : 0;
+    c.groundY[idx] = hits.length ? hits[hits.length - 1].point.y : 0;
+    c.surfY[idx] = wet ? wet.point.y : hits[0] ? hits[0].point.y : 0;
+    c.waterY[idx] = wet ? wet.point.y : 0;
+    let f = FLAG_CACHED;
+    if (hits.length > 0 && (waterMeshes.has(hits[0].object) || edgeMeshes.has(hits[0].object))) f |= FLAG_WATER_OR_EDGE;
+    if (wet) f |= FLAG_HAS_WATER;
+    c.flags[idx] = f;
+  }
+  const f = c.flags[idx];
+  _terrainOut.topY = c.topY[idx];
+  _terrainOut.groundY = c.groundY[idx];
+  _terrainOut.surfY = c.surfY[idx];
+  _terrainOut.waterY = c.waterY[idx];
+  _terrainOut.isWaterOrEdge = (f & FLAG_WATER_OR_EDGE) !== 0;
+  _terrainOut.hasWater = (f & FLAG_HAS_WATER) !== 0;
+  return _terrainOut;
+}
+
+function isWater(x, z) {
+  if (!waterMeshes.size) return false;
+  const s = sampleTerrain(x, z);
+  return !!s && s.isWaterOrEdge;
+}
 // Height of the highest surface at that point (ground, or top of house/tree/fence)
 function topHeight(x, z) {
-  if (!townMeshes.length) return 0;
-  ray.set(new THREE.Vector3(x, 200, z), DOWN);
-  // ignore the pond edge stones: they are walls, not floor
-  const hits = ray
-    .intersectObjects(townMeshes, false)
-    .filter((h) => !edgeMeshes.has(h.object));
-  return hits.length ? hits[0].point.y : 0;
+  const s = sampleTerrain(x, z);
+  return s ? s.topY : 0;
 }
 // Ground height: lowest surface (ignores roofs above)
 function groundHeight(x, z) {
-  if (!townMeshes.length) return 0;
-  ray.set(new THREE.Vector3(x, 200, z), DOWN);
-  const hits = ray.intersectObjects(townMeshes, false);
-  return hits.length ? hits[hits.length - 1].point.y : 0;
+  const s = sampleTerrain(x, z);
+  return s ? s.groundY : 0;
 }
 
 // A point is "open" if the ground is flat within radius r (nothing tall nearby)
@@ -1751,9 +1930,21 @@ function placeOwl() {
 }
 
 // ---- Capybara (middle of town; E feeds it) ----
+const animalShadowGeo = new THREE.CircleGeometry(0.65, 12);
+const animalShadowMat = new THREE.MeshBasicMaterial({
+  map: glowTexture,
+  color: 0,
+  transparent: true,
+  opacity: 0.3,
+  depthWrite: false,
+});
 const capy = createCapybara();
 capy.mesh.position.set(6, 0, 4);
 scene.add(capy.mesh);
+const capyShadow = new THREE.Mesh(animalShadowGeo, animalShadowMat);
+capyShadow.rotation.x = -Math.PI / 2;
+capyShadow.scale.setScalar(1.1);
+scene.add(capyShadow);
 // the open spot nearest the middle, off the spawn point and clear of benches, posts and the board
 function placeCapybara() {
   for (let r = 0; r <= 14; r += 0.5)
@@ -1835,10 +2026,15 @@ function makeCatEntry(cfg) {
   const sprite = createCat(cfg.palette);
   sprite.mesh.position.set(0, 0, 5);
   scene.add(sprite.mesh);
+  const catShadow = new THREE.Mesh(animalShadowGeo, animalShadowMat);
+  catShadow.rotation.x = -Math.PI / 2;
+  catShadow.scale.setScalar(0.75);
+  scene.add(catShadow);
   return {
     ...cfg,
     sprite,
     mesh: sprite.mesh,
+    shadow: catShadow,
     feet: useFeetDepth(sprite.mesh),
     fed: { at: 0, until: 0, lost: 0 },
     leg: null,
@@ -1872,8 +2068,8 @@ function buildCatNavGrid() {
     const key = `${Math.round(x * 2)},${Math.round(z * 2)}`;
     let hit = groundCache.get(key);
     if (hit) return hit;
-    ray.set(new THREE.Vector3(x, 200, z), DOWN);
-    const hits = ray.intersectObjects(townMeshes, false);
+    ray.set(_rayOrigin.set(x, 200, z), DOWN);
+    const hits = ray.intersectObjects(meshesAt(x, z), false);
     const water = hits.length > 0 && (waterMeshes.has(hits[0].object) || edgeMeshes.has(hits[0].object));
     const floorHits = hits.filter((h) => !edgeMeshes.has(h.object));
     hit = {
@@ -2393,31 +2589,112 @@ function isFree(x, z, currentY) {
 
 // ---- Character (billboard sprite) ----
 // Without a configured sheet, uses an original trainer generated in pixel art.
+const rawSheets = new Map(); // gender -> HTMLImageElement
+const rawSheetWaiters = new Map(); // gender -> Array<{ ok, fail }>
+const processedSheets = new Map(); // `${gender}:${cap}` -> HTMLCanvasElement
+function processSheetImage(img, cfg, gender, cap) {
+  const cv = Object.assign(document.createElement("canvas"), {
+    width: img.width,
+    height: img.height,
+  });
+  const ctx = cv.getContext("2d");
+  ctx.drawImage(img, 0, 0);
+  const d = ctx.getImageData(0, 0, cv.width, cv.height);
+  const [ox, oy] = cfg.origin;
+  const i0 = (oy * cv.width + ox) * 4;
+  const bg = [d.data[i0], d.data[i0 + 1], d.data[i0 + 2]];
+  for (let i = 0; i < d.data.length; i += 4) {
+    if (
+      Math.abs(d.data[i] - bg[0]) < 8 &&
+      Math.abs(d.data[i + 1] - bg[1]) < 8 &&
+      Math.abs(d.data[i + 2] - bg[2]) < 8
+    )
+      d.data[i + 3] = 0;
+  }
+  recolorCap(d.data, cv.width, gender, cap);
+  ctx.putImageData(d, 0, 0);
+  return withSitFrames(cv, cfg);
+}
+function loadProcessedSheet(gender, cap, onOk, onFail) {
+  const key = `${gender}:${cap}`;
+  const cached = processedSheets.get(key);
+  if (cached) return void queueMicrotask(() => onOk(cached));
+  const raw = rawSheets.get(gender);
+  if (raw) {
+    const cv = processSheetImage(raw, CROP[gender], gender, cap);
+    processedSheets.set(key, cv);
+    return void queueMicrotask(() => onOk(cv));
+  }
+  let waiters = rawSheetWaiters.get(gender);
+  const first = !waiters;
+  if (!waiters) rawSheetWaiters.set(gender, (waiters = []));
+  waiters.push({ cap, onOk, onFail });
+  if (!first) return;
+  const img = new Image();
+  img.onload = () => {
+    rawSheets.set(gender, img);
+    const list = rawSheetWaiters.get(gender) || [];
+    rawSheetWaiters.delete(gender);
+    for (const w of list) {
+      const k = `${gender}:${w.cap}`;
+      let cv = processedSheets.get(k);
+      if (!cv) {
+        cv = processSheetImage(img, CROP[gender], gender, w.cap);
+        processedSheets.set(k, cv);
+      }
+      w.onOk(cv);
+    }
+  };
+  img.onerror = () => {
+    const list = rawSheetWaiters.get(gender) || [];
+    rawSheetWaiters.delete(gender);
+    for (const w of list) w.onFail?.();
+  };
+  img.src = SHEETS[gender];
+}
+let myTexGen = 0;
 function createCharacterTexture(gender) {
+  const cap = myCap();
+  const gen = ++myTexGen;
   const path = sheetAvailable(gender) ? SHEETS[gender] : null;
   if (path) {
-    const t = texLoader.load(
-      path,
-      (t) => {
-        t.magFilter = t.minFilter = THREE.NearestFilter;
-        t.colorSpace = THREE.SRGBColorSpace;
-        removeBackground(t);
+    const cached = processedSheets.get(`${gender}:${cap}`);
+    const t = new THREE.Texture(cached || undefined);
+    t.magFilter = t.minFilter = THREE.NearestFilter;
+    t.colorSpace = THREE.SRGBColorSpace;
+    if (cached) {
+      t.needsUpdate = true;
+      queueMicrotask(() => {
+        if (gen !== myTexGen) return;
+        setFrame("down", 0);
+        dispatchEvent(new Event("trainer:look"));
+      });
+      return t;
+    }
+    loadProcessedSheet(
+      gender,
+      cap,
+      (cv) => {
+        if (gen !== myTexGen) return;
+        t.dispose();
+        t.image = cv;
+        t.needsUpdate = true;
         setFrame("down", 0);
         dispatchEvent(new Event("trainer:look")); // the start screen's preview
       },
-      undefined,
       () => {
         // asset unavailable: fall back to the original trainer
         failedSheets.add(gender);
-        if (gender === GENDER) applyGender(GENDER);
+        if (gen === myTexGen && gender === GENDER) applyGender(GENDER);
       },
     );
     return t;
   }
-  const t = new THREE.CanvasTexture(generateOriginalTrainer(gender, myCap()));
+  const t = new THREE.CanvasTexture(generateOriginalTrainer(gender, cap));
   t.magFilter = t.minFilter = THREE.NearestFilter;
   t.colorSpace = THREE.SRGBColorSpace;
   queueMicrotask(() => {
+    if (gen !== myTexGen) return;
     setFrame("down", 0);
     dispatchEvent(new Event("trainer:look"));
   });
@@ -2626,33 +2903,11 @@ const shadow = new THREE.Mesh(
 shadow.rotation.x = -Math.PI / 2;
 scene.add(shadow);
 
-// Replace the sheet's background color (pixel 0,0 of the first frame) with transparent
+// Keep helper for fallback callers if any; uses processSheetImage
 function removeBackground(t, cfg = CHARACTER.cfg, gender = GENDER, cap = myCap()) {
-  const img = t.image;
-  const cv = Object.assign(document.createElement("canvas"), {
-    width: img.width,
-    height: img.height,
-  });
-  const ctx = cv.getContext("2d");
-  ctx.drawImage(img, 0, 0);
-  const d = ctx.getImageData(0, 0, cv.width, cv.height);
-  const [ox, oy] = cfg.origin;
-  const i0 = (oy * cv.width + ox) * 4;
-  const bg = [d.data[i0], d.data[i0 + 1], d.data[i0 + 2]];
-  for (let i = 0; i < d.data.length; i += 4) {
-    if (
-      Math.abs(d.data[i] - bg[0]) < 8 &&
-      Math.abs(d.data[i + 1] - bg[1]) < 8 &&
-      Math.abs(d.data[i + 2] - bg[2]) < 8
-    )
-      d.data[i + 3] = 0;
-  }
-  recolorCap(d.data, cv.width, gender, cap);
-  ctx.putImageData(d, 0, 0);
-  // the sitting row makes the image taller, and a texture already on the GPU can't change size:
-  // dispose of it so the next frame uploads a new one with the new image
+  const cv = processSheetImage(t.image, cfg, gender, cap);
   t.dispose();
-  t.image = withSitFrames(cv, cfg);
+  t.image = cv;
   t.needsUpdate = true;
 }
 
@@ -3269,6 +3524,7 @@ function changeName(newName) {
   if (!newName || newName === NAME) return;
   NAME = newName;
   elName.textContent = NAME;
+  syncMyNameTag();
   try {
     localStorage.setItem("name", NAME);
   } catch {}
@@ -3315,6 +3571,7 @@ for (const row of document.querySelectorAll("#name-colors, #my-colors"))
   }
 const elMyColors = document.querySelector("#my-colors");
 document.querySelector("#my-color").addEventListener("click", () => (elMyColors.hidden = !elMyColors.hidden));
+let myTagReady = false;
 function applyColor(color) {
   const changed = color !== COLOR;
   COLOR = color;
@@ -3324,6 +3581,7 @@ function applyColor(color) {
   }
   paintName(document.querySelector("#place .me"), COLOR); // the name and the dot next to it
   paintName(elEnterName, COLOR);
+  if (myTagReady) syncMyNameTag();
   if (!changed) return;
   try { localStorage.setItem("name-color", COLOR); } catch {}
   if (MULTIPLAYER && ws?.readyState === 1)
@@ -3377,25 +3635,13 @@ function createOther(p) {
   const g = p.gender === "female" ? "female" : "male";
   const cap = capOf(p.cap) ?? SHEET_CAP[g]; // none sent: the cap that trainer is drawn with (red cap, white beanie)
   const available = sheetAvailable(g);
+  const cached = available ? processedSheets.get(`${g}:${cap}`) : null;
   const tex = available
-    ? texLoader.load(
-        SHEETS[g],
-        () => {
-          removeBackground(tex, CROP[g], g, cap);
-          setFrameTex(tex, CROP[g], o.dir, o.step);
-        },
-        undefined,
-        () => {
-          failedSheets.add(g);
-          o.cfg = GRID;
-          tex.dispose(); // a different size from the sheet: a new texture on the GPU
-          tex.image = generateOriginalTrainer(g, cap);
-          tex.needsUpdate = true;
-        },
-      )
+    ? new THREE.Texture(cached || undefined)
     : new THREE.CanvasTexture(generateOriginalTrainer(g, cap));
   tex.magFilter = tex.minFilter = THREE.NearestFilter;
   tex.colorSpace = THREE.SRGBColorSpace;
+  if (cached) tex.needsUpdate = true;
   const mesh = new THREE.Mesh(
     characterGeo,
     new THREE.MeshLambertMaterial({
@@ -3435,9 +3681,38 @@ function createOther(p) {
     admin: !!p.admin,
     prs: p.prs | 0, // merged pull requests: the contributor badge
     n: Number.isInteger(p.n) ? p.n : -1, // account number (-1: no account), for the profile
+    groundY: undefined,
+    groundX: NaN,
+    groundZ: NaN,
   };
+  if (available) {
+    if (cached) {
+      setFrameTex(tex, CROP[g], o.dir, o.step);
+    } else {
+      loadProcessedSheet(
+        g,
+        cap,
+        (cv) => {
+          if (!o.mesh.parent) return;
+          tex.dispose();
+          tex.image = cv;
+          tex.needsUpdate = true;
+          setFrameTex(tex, CROP[g], o.dir, o.step);
+        },
+        () => {
+          failedSheets.add(g);
+          if (!o.mesh.parent) return;
+          o.cfg = GRID;
+          tex.dispose(); // a different size from the sheet: a new texture on the GPU
+          tex.image = generateOriginalTrainer(g, cap);
+          tex.needsUpdate = true;
+        },
+      );
+    }
+  }
   mesh.position.copy(o.target);
   others.set(p.id, o);
+  nameTag(o.mesh, o.name || "trainer", p.id, o.admin, o.color, o.prs);
   updateCount();
   return o;
 }
@@ -3456,6 +3731,9 @@ function removeOther(id) {
   const o = others.get(id);
   if (!o) return;
   scene.remove(o.mesh);
+  o.mesh.material.dispose();
+  o.mesh.customDepthMaterial?.dispose();
+  o.mesh.customDistanceMaterial?.dispose();
   if (o.held) scene.remove(o.held), o.held.material.dispose();
   o.gear?.dispose();
   o.tex.dispose();
@@ -3544,18 +3822,19 @@ function connect() {
       NAME = m.name;
       elName.textContent = NAME;
       elEnterName.value = NAME;
+      syncMyNameTag();
       try { localStorage.setItem("name", NAME); } catch {}
       addToHistory("system", m.msg);
     } else if (m.t === "who") showWho(m);
     else if (m.t === "admin") {
-      if (m.id === myId) meAdmin = true;
+      if (m.id === myId) { meAdmin = true; syncMyNameTag(); }
       const o = others.get(m.id);
-      if (o) o.admin = true;
+      if (o) { o.admin = true; nameTag(o.mesh, o.name || "trainer", m.id, o.admin, o.color, o.prs); }
     }
     else if (m.t === "contrib") {
-      if (m.id === myId) myPrs = m.prs | 0;
+      if (m.id === myId) { myPrs = m.prs | 0; syncMyNameTag(); }
       const o = others.get(m.id);
-      if (o) o.prs = m.prs | 0;
+      if (o) { o.prs = m.prs | 0; nameTag(o.mesh, o.name || "trainer", m.id, o.admin, o.color, o.prs); }
     }
     else if (m.t === "github-code") showGithubCode(m);
     else if (m.t === "github-ok") {
@@ -3582,10 +3861,10 @@ function connect() {
     }
     else if (m.t === "name") {
       const o = others.get(m.id);
-      if (o) o.name = m.name;
+      if (o) { o.name = m.name; nameTag(o.mesh, o.name || "trainer", m.id, o.admin, o.color, o.prs); }
     } else if (m.t === "color") {
       const o = others.get(m.id);
-      if (o) o.color = m.color;
+      if (o) { o.color = m.color; nameTag(o.mesh, o.name || "trainer", m.id, o.admin, o.color, o.prs); }
     } else if (m.t === "gender") {
       // recreate the character with the other gender's look, keeping the position
       const o = others.get(m.id);
@@ -3647,7 +3926,7 @@ function connect() {
     clearInterval(pingTimer);
     pingTimer = 0;
     myLeaveToken = "";
-    [...others.keys()].forEach(removeOther);
+    for (const id of [...others.keys()]) if (!id.startsWith("__stress_")) removeOther(id);
     if (!kicked && !pageUnloading) reconnectTimer = setTimeout(connect, 2000); // reconnect
   };
 }
@@ -3712,7 +3991,14 @@ function updateOthers(dt) {
     if (seat) {
       m.position.set(seat.x, seat.y, seat.z);
       o.target.set(seat.x, 0, seat.z);
-    } else m.position.y = topHeight(m.position.x, m.position.z);
+    } else {
+      if (o.groundY === undefined || Math.abs(m.position.x - o.groundX) > 0.05 || Math.abs(m.position.z - o.groundZ) > 0.05) {
+        o.groundX = m.position.x;
+        o.groundZ = m.position.z;
+        o.groundY = topHeight(o.groundX, o.groundZ);
+      }
+      m.position.y = o.groundY;
+    }
     m.castShadow = !isRideSeat(o.seat); // see the loop: riders cast no shadow
     m.rotation.copy(sprite.rotation);
     // running uses the run frames of the same sheet, like your own trainer (not on the code-drawn fallback)
@@ -3925,16 +4211,40 @@ function nameTag(mesh, name, id, admin, color, prs = 0) {
   // contributor: a ball and the merged pull requests
   showPrs(el.children[1], prs | 0);
 }
+function syncMyNameTag() {
+  if (myTagReady) nameTag(sprite, NAME, null, meAdmin, COLOR, myPrs);
+}
+myTagReady = true;
+syncMyNameTag();
+function placeOverlay(el, x, y, onScreen = true) {
+  if (el._vis !== onScreen) {
+    el._vis = onScreen;
+    el.style.display = onScreen ? "" : "none";
+  }
+  if (!onScreen) return;
+  const rx = Math.round(x);
+  const ry = Math.round(y);
+  if (el._px === rx && el._py === ry) return;
+  el._px = rx;
+  el._py = ry;
+  el.style.transform = `translate3d(${rx}px,${ry}px,0) translate(-50%,-100%)`;
+}
+function placeLeftTop(el, x, y) {
+  const rx = Math.round(x);
+  const ry = Math.round(y);
+  if (el._px === rx && el._py === ry) return;
+  el._px = rx;
+  el._py = ry;
+  el.style.left = `${rx}px`;
+  el.style.top = `${ry}px`;
+}
 function updateNameTags() {
-  nameTag(sprite, NAME, null, meAdmin, COLOR, myPrs);
-  for (const [id, o] of others) nameTag(o.mesh, o.name || "trainer", id, o.admin, o.color, o.prs);
   for (const [mesh, el] of nameTags) {
     if (!mesh.parent) { el.remove(); nameTags.delete(mesh); continue; }
     const baseY = mesh === sprite ? pos.y : mesh.position.y + (mesh.userData.lift || 0);
     _v.set(mesh.position.x, baseY + mesh.scale.y * 0.92 + headCatLift(mesh), mesh.position.z).project(camera);
-    el.style.left = `${(_v.x * 0.5 + 0.5) * innerWidth}px`;
-    el.style.top = `${(-_v.y * 0.5 + 0.5) * innerHeight}px`;
-    el.style.display = _v.z < 1 ? "" : "none";
+    const onScreen = _v.z < 1 && _v.x >= -1.15 && _v.x <= 1.15 && _v.y >= -1.15 && _v.y <= 1.15;
+    placeOverlay(el, (_v.x * 0.5 + 0.5) * innerWidth, (-_v.y * 0.5 + 0.5) * innerHeight, onScreen);
   }
 }
 
@@ -3969,8 +4279,7 @@ function updateSitPrompt(seat) {
   sitPrompt.hidden = !s;
   if (!s) return;
   _v.set(s.x, s.y + 5.2, s.z).project(camera); // above a standing trainer's name tag
-  sitPrompt.style.left = `${(_v.x * 0.5 + 0.5) * innerWidth}px`;
-  sitPrompt.style.top = `${(-_v.y * 0.5 + 0.5) * innerHeight}px`;
+  placeOverlay(sitPrompt, (_v.x * 0.5 + 0.5) * innerWidth, (-_v.y * 0.5 + 0.5) * innerHeight, _v.z < 1);
 }
 function updateBubbles() {
   const now = performance.now();
@@ -3991,8 +4300,8 @@ function updateBubbles() {
       owner.position.z,
     ).project(camera);
     _v.y += 20 / (innerHeight / 2); // move above the name tag
-    b.el.style.left = `${(_v.x * 0.5 + 0.5) * innerWidth}px`;
-    b.el.style.top = `${(-_v.y * 0.5 + 0.5) * innerHeight}px`;
+    const onScreen = _v.z < 1 && _v.x >= -1.2 && _v.x <= 1.2 && _v.y >= -1.2 && _v.y <= 1.2;
+    placeOverlay(b.el, (_v.x * 0.5 + 0.5) * innerWidth, (-_v.y * 0.5 + 0.5) * innerHeight, onScreen);
   }
 }
 
@@ -4267,12 +4576,12 @@ function updateCapy() {
   walkCapy(t);
   capy.update(t);
   capy.mesh.rotation.set(camera.rotation.x * 0.5, 0, 0); // faces the camera like the trainers
+  capyShadow.position.set(capy.mesh.position.x, capy.mesh.position.y + 0.05, capy.mesh.position.z);
   const show = eNow === "capy" && !bubbles.has(capy.mesh);
   capyPrompt.classList.toggle("on", show);
   if (!show) return;
   _v.set(capy.mesh.position.x, capy.mesh.position.y + 5, capy.mesh.position.z).project(camera);
-  capyPrompt.style.left = `${(_v.x * 0.5 + 0.5) * innerWidth}px`;
-  capyPrompt.style.top = `${(-_v.y * 0.5 + 0.5) * innerHeight}px`;
+  placeOverlay(capyPrompt, (_v.x * 0.5 + 0.5) * innerWidth, (-_v.y * 0.5 + 0.5) * innerHeight, _v.z < 1);
 }
 // ---- Skipping stones (T by the pond) ----
 // You plan the throw (where the stone touches the water), see it at once, and the room sends it to
@@ -4355,16 +4664,14 @@ function updateStonePrompt() {
   stonePrompt.classList.toggle("on", show);
   if (!show) return;
   _v.set(sprite.position.x, sprite.position.y + 6.2, sprite.position.z).project(camera);
-  stonePrompt.style.left = `${(_v.x * 0.5 + 0.5) * innerWidth}px`;
-  stonePrompt.style.top = `${(-_v.y * 0.5 + 0.5) * innerHeight}px`;
+  placeOverlay(stonePrompt, (_v.x * 0.5 + 0.5) * innerWidth, (-_v.y * 0.5 + 0.5) * innerHeight, _v.z < 1);
 }
 function updateWallPrompt() {
   const show = eNow === "wall";
   wallPrompt.classList.toggle("on", show);
   if (!show) return;
   _v.set(board.position.x, board.position.y + 7.4, board.position.z).project(camera);
-  wallPrompt.style.left = `${(_v.x * 0.5 + 0.5) * innerWidth}px`;
-  wallPrompt.style.top = `${(-_v.y * 0.5 + 0.5) * innerHeight}px`;
+  placeLeftTop(wallPrompt, (_v.x * 0.5 + 0.5) * innerWidth, (-_v.y * 0.5 + 0.5) * innerHeight);
 }
 
 function updateCats() {
@@ -4373,14 +4680,15 @@ function updateCats() {
     walkCat(cat, t);
     cat.sprite.update(t);
     cat.mesh.rotation.set(camera.rotation.x * 0.5, 0, 0);
+    cat.shadow.visible = !cat.ridingMesh && !cat.hopOff;
+    if (cat.shadow.visible) cat.shadow.position.set(cat.mesh.position.x, cat.mesh.position.y + 0.05, cat.mesh.position.z);
   }
   const active = nearCat();
   const show = eNow === "cat" && !!active && !bubbles.has(active.mesh);
   catPrompt.classList.toggle("on", show);
   if (!show) return;
   _v.set(active.mesh.position.x, active.mesh.position.y + 4.2, active.mesh.position.z).project(camera);
-  catPrompt.style.left = `${(_v.x * 0.5 + 0.5) * innerWidth}px`;
-  catPrompt.style.top = `${(-_v.y * 0.5 + 0.5) * innerHeight}px`;
+  placeOverlay(catPrompt, (_v.x * 0.5 + 0.5) * innerWidth, (-_v.y * 0.5 + 0.5) * innerHeight, _v.z < 1);
 }
 
 const fishing = createFishing({
@@ -4398,12 +4706,11 @@ const fishing = createFishing({
 function sendFish(target) {
   if (ws?.readyState === 1) ws.send(JSON.stringify(target ? { t: "fish", on: true, x: target.x, z: target.z } : { t: "fish", on: false }));
 }
-const _waterFrom = new THREE.Vector3();
 /** @returns {number | null} the height of the water at (x, z), or null where there is none (or the town isn't loaded yet) */
 function waterY(x, z) {
-  ray.set(_waterFrom.set(x, 200, z), DOWN);
-  const hit = ray.intersectObjects([...waterMeshes], false)[0];
-  return hit ? hit.point.y : null;
+  if (!waterMeshes.size) return null;
+  const s = sampleTerrain(x, z);
+  return s && s.hasWater ? s.waterY : null;
 }
 /**
  * Where you could cast from: at the pond's edge (standing or seated), facing the water.
@@ -4517,8 +4824,7 @@ function updateFishing() {
     _v.set(here.x + fx * (here.d + 2.5), pos.y + 2.2, here.z + fz * (here.d + 2.5));
   }
   _v.project(camera);
-  fishPrompt.style.left = `${(_v.x * 0.5 + 0.5) * innerWidth}px`;
-  fishPrompt.style.top = `${(-_v.y * 0.5 + 0.5) * innerHeight}px`;
+  placeLeftTop(fishPrompt, (_v.x * 0.5 + 0.5) * innerWidth, (-_v.y * 0.5 + 0.5) * innerHeight);
 }
 
 if (import.meta.env.DEV) {
@@ -4547,16 +4853,66 @@ if (import.meta.env.DEV) {
       getLook: () => currentLook,
       getRainAmount: () => rainAmount,
       getLampIntensity: () => lampLights[0]?.intensity ?? 0,
+      others,
+      createOther,
+      removeOther,
+      showBubble,
+      getPos: () => pos,
+      keepAwake: () => { lastActivity = performance.now(); },
+      NAME_COLORS,
+      CAPS,
     });
   });
 }
 
+// ---- Eco / Study mode (30 FPS cap + disable backdrop blur) ----
+let ecoMode = false;
+try { ecoMode = localStorage.getItem("eco") === "1"; } catch {}
+const ecoBtn = document.querySelector("#eco");
+function applyEco() {
+  document.body.classList.toggle("eco", ecoMode);
+  if (ecoBtn) {
+    ecoBtn.classList.toggle("on", ecoMode);
+    ecoBtn.setAttribute("aria-label", ecoMode ? "exit eco mode (60 fps)" : "eco mode (30 fps)");
+  }
+}
+function toggleEco() {
+  ecoMode = !ecoMode;
+  try { localStorage.setItem("eco", ecoMode ? "1" : "0"); } catch {}
+  applyEco();
+}
+applyEco();
+ecoBtn?.addEventListener("click", (e) => {
+  toggleEco();
+  e.currentTarget.blur();
+});
+let lastActivity = performance.now();
+const markActive = () => { lastActivity = performance.now(); };
+addEventListener("keydown", (e) => {
+  markActive();
+  if (!typing() && !e.repeat && !e.ctrlKey && !e.metaKey && !e.altKey && e.key.toLowerCase() === "l") toggleEco();
+});
+addEventListener("pointerdown", markActive);
+addEventListener("pointermove", () => { if (stick.id !== null) markActive(); });
+addEventListener("wheel", markActive, { passive: true });
+
+let lastRenderAt = 0;
+const _movers = [];
 function loop() {
+  requestAnimationFrame(loop);
+  if (document.hidden) return;
   const now = performance.now();
+  const anyMove = keys.arrowup || keys.w || keys.arrowdown || keys.s || keys.arrowleft || keys.a || keys.arrowright || keys.d || stick.x || stick.z;
+  if (anyMove && !gamePaused && !wall.isOpen()) lastActivity = now;
+  const isIdle = !anyMove && now - lastActivity > 10_000;
+  const minFrameMs = ecoMode || gamePaused || isIdle ? 33 : 0;
+  if (minFrameMs > 0 && now - lastRenderAt < minFrameMs - 1) return;
+  lastRenderAt = now;
+
   const dt = Math.min(clock.getDelta(), 0.05);
   countFrame();
   checkSavedPosition();
-  savePosition(performance.now());
+  savePosition(now);
   waterUniforms.uTime.value += dt;
   // candles: the light and the flames waver a little
   const waver = 0.85 + 0.15 * Math.sin(waterUniforms.uTime.value * 9) * Math.sin(waterUniforms.uTime.value * 5.3);
@@ -4647,8 +5003,13 @@ function loop() {
   shadow.visible = mySeat < 0; // would float under the hanging feet
   camera.position.set(pos.x + slide.x, pos.y + 38, pos.z + 42 + slide.z);
   camera.lookAt(pos.x + slide.x, pos.y + 1, pos.z + slide.z);
+  camera.updateMatrixWorld();
+  _projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  _frustum.setFromProjectionMatrix(_projScreenMatrix);
+  cullLights();
+
   updateCapy();
-  owl.update(performance.now(), pos);
+  owl.update(now, pos);
   owl.mesh.rotation.set(camera.rotation.x * 0.5, 0, 0); // faces the camera like the trainers
   updateFishing();
   updateCats();
@@ -4663,8 +5024,10 @@ function loop() {
   // Riders cast no shadow and are no lamp's concern: the lamps by the pond reach the rides, and
   // someone going round would make them redraw their 6 shadow passes every frame, all night
   sprite.castShadow = !riding;
-  const movers = [...others.values()].filter((o) => !isRideSeat(o.seat)).map((o) => o.mesh);
-  updateLampShadows([...(riding ? [] : [sprite]), capy.mesh, owl.mesh, ...cats.map((c) => c.mesh), ...movers]);
+  _movers.length = 0;
+  if (!riding) _movers.push(sprite);
+  for (const o of others.values()) if (!isRideSeat(o.seat)) _movers.push(o.mesh);
+  updateLampShadows(_movers);
   renderer.render(scene, camera);
   updateNameTags();
   updateBubbles();
@@ -4672,6 +5035,5 @@ function loop() {
   updateCoasterSign();
   updateWallPrompt();
   updateStonePrompt();
-  requestAnimationFrame(loop);
 }
 loop();

@@ -526,7 +526,7 @@ export function createCat(paletteName = "black") {
     map: tex,
     alphaTest: 0.5,
   });
-  mesh.castShadow = true;
+  mesh.castShadow = false; // contact shadow added in main.js; avoids 6-face lamp cubemap redraws all night
   mesh.scale.set(3.5, 3.5, 1);
 
   let pose = "sit"; // "walk" | "sit" | "eat" | "perch"

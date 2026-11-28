@@ -95,7 +95,7 @@ export function createOwl() {
     new THREE.MeshLambertMaterial({ map: tex, emissive: 0xffffff, emissiveMap: tex, emissiveIntensity: 0.35, alphaTest: 0.5, side: THREE.DoubleSide }),
   );
   mesh.customDepthMaterial = new THREE.MeshDepthMaterial({ map: tex, alphaTest: 0.5, depthPacking: THREE.RGBADepthPacking });
-  mesh.castShadow = true;
+  mesh.castShadow = false; // sits high on roofs/lamps; avoids 6-face lamp cubemap redraws
   mesh.scale.set(2.5, 2.5, 1); // same pixel size as a trainer (5 units per 32px)
   mesh.visible = false; // until it has somewhere to perch
 
